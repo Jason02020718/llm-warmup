@@ -1,0 +1,31 @@
+# 数据集（MNIST 约 11MB，可自动下载，不进版本库）
+data/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.ipynb_checkpoints/
+
+# 环境
+.venv/
+venv/
+env/
+
+# 训练中间产物
+*.pt
+*.pth
+*.ckpt
+*.log
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# 例外：这些结果要提交，用来支撑 README 里的对比表
+!results/curve.png
+!results/runs.csv
+!results/env_report.md
+!results/last_run.json

@@ -80,6 +80,74 @@ class CIFARNet(nn.Module):
 
 
 # --------------------------------------------------------------------------
+# 可深可浅版本：用来验证「梯度消失」和「残差连接」
+#   每个 block 2 个 3x3 卷积，--depth 16 就是 8 个 block
+#   --residual 打开时，每个 block 加一条捷径（通道/尺寸变了就上 1x1 卷积）
+# --------------------------------------------------------------------------
+class BasicBlock(nn.Module):
+    def __init__(self, cin: int, cout: int, stride: int = 1,
+                 use_bn: bool = True, residual: bool = False):
+        super().__init__()
+        self.residual = residual
+        self.conv1 = nn.Conv2d(cin, cout, 3, stride=stride, padding=1, bias=not use_bn)
+        self.bn1 = nn.BatchNorm2d(cout) if use_bn else nn.Identity()
+        self.conv2 = nn.Conv2d(cout, cout, 3, stride=1, padding=1, bias=not use_bn)
+        self.bn2 = nn.BatchNorm2d(cout) if use_bn else nn.Identity()
+        self.relu = nn.ReLU(inplace=True)
+        if residual:
+            self.short = nn.Sequential()
+            if stride != 1 or cin != cout:
+                self.short = nn.Sequential(
+                    nn.Conv2d(cin, cout, 1, stride=stride, bias=False),
+                    nn.BatchNorm2d(cout) if use_bn else nn.Identity(),
+                )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        out = self.relu(self.bn1(self.conv1(x)))
+        out = self.bn2(self.conv2(out))
+        if self.residual:
+            out = out + self.short(x)
+        return self.relu(out)
+
+
+class DeepNet(nn.Module):
+    """把 --depth 个卷积层平铺成 3 个 stage，可选残差。
+
+    和 CIFARNet 的区别：用 stride=2 的卷积下采样（不是 MaxPool），
+    这样加了残差之后形状才对得上。
+    """
+
+    def __init__(self, depth: int, widths=(64, 128, 256), use_bn: bool = True,
+                 residual: bool = False, dropout: float = 0.0, num_classes: int = 10):
+        super().__init__()
+        n_blocks = max(depth // 2, 1)
+        base = n_blocks // 3
+        per_stage = [base, base, n_blocks - 2 * base]
+        if per_stage[0] == 0:
+            per_stage[0] = 1
+            per_stage[2] = max(per_stage[2] - 1, 0)
+
+        blocks: list[nn.Module] = []
+        cin = 3
+        for stage, (w, nb) in enumerate(zip(widths, per_stage)):
+            for i in range(nb):
+                stride = 2 if (i == 0 and stage > 0) else 1
+                blocks.append(BasicBlock(cin, w, stride=stride, use_bn=use_bn, residual=residual))
+                cin = w
+        self.features = nn.Sequential(*blocks)
+        self.pool = nn.AdaptiveAvgPool2d(1)
+        self.dropout = nn.Dropout(dropout)
+        self.fc = nn.Linear(cin, num_classes)
+        self.depth = depth
+        self.residual = residual
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.features(x)
+        x = self.pool(x).flatten(1)
+        return self.fc(self.dropout(x))
+
+
+# --------------------------------------------------------------------------
 # 工具
 # --------------------------------------------------------------------------
 def set_seed(seed: int) -> None:
@@ -177,6 +245,8 @@ def main() -> int:
     ap.add_argument("--scheduler", choices=["none", "cosine", "step"], default="cosine")
     ap.add_argument("--amp", choices=["none", "bf16", "fp16"], default="none")
     ap.add_argument("--widths", default="64,128,256", help="三个卷积块的通道数")
+    ap.add_argument("--depth", type=int, default=0, help="卷积层总数；0 表示用默认的 3 块 CIFARNet，16 表示 8 个残差块")
+    ap.add_argument("--residual", action="store_true", help="给每个 block 加捷径连接（只在 --depth 生效时起作用）")
     ap.add_argument("--data-root", default="./data/cifar10")
     ap.add_argument("--out-dir", default="./results_cifar")
     ap.add_argument("--val-size", type=int, default=5000)
@@ -229,7 +299,11 @@ def main() -> int:
                              pin_memory=pin, persistent_workers=nw > 0)
     print(f"数据就绪：train={len(train_ds)} val={len(val_ds)} test={len(test_ds)}")
 
-    model = CIFARNet(widths=widths, dropout=args.dropout, use_bn=use_bn).to(device)
+    if args.depth:
+        model = DeepNet(args.depth, widths=widths, use_bn=use_bn,
+                        residual=args.residual, dropout=args.dropout).to(device)
+    else:
+        model = CIFARNet(widths=widths, dropout=args.dropout, use_bn=use_bn).to(device)
     n_params = sum(p.numel() for p in model.parameters())
     print(f"模型参数量：{n_params:,}")
 
@@ -312,9 +386,16 @@ def main() -> int:
             row = {"epoch": epoch}
             for k, v in last_grad.items():
                 row[k] = v["ratio"]
+                row[f"abs::{k}"] = v["grad"]
             grad_hist.append(row)
             worst = min(last_grad.items(), key=lambda kv: kv[1]["ratio"])
-            print(f"          梯度/权重 最小：{worst[0]} = {worst[1]['ratio']:.2e}")
+            abss = {k: v["grad"] for k, v in last_grad.items()}
+            lo_k = min(abss, key=abss.get)
+            hi_k = max(abss, key=abss.get)
+            spread = math.log10(max(abss[hi_k], 1e-30) / max(abss[lo_k], 1e-30))
+            print(f"          比值最小：{worst[0]} = {worst[1]['ratio']:.2e}"
+                  f" | 绝对梯度跨度 {spread:.1f} 个数量级"
+                  f"（最弱 {lo_k}，最强 {hi_k}）")
 
         if val_acc > best_val:
             best_val = val_acc
@@ -393,10 +474,21 @@ def _save(args, out_dir: Path, tag: str, device, history, grad_hist, summary) ->
 
     # 梯度流
     if grad_hist:
-        layers = [k for k in grad_hist[0] if k != "epoch"]
+        layers = [k for k in grad_hist[0] if k != "epoch" and not k.startswith("abs::")]
         with (out_dir / f"gradflow_{tag}.csv").open("w", newline="", encoding="utf-8-sig") as f:
             w = csv.DictWriter(f, fieldnames=["epoch"] + layers)
-            w.writeheader(); w.writerows(grad_hist)
+            w.writeheader()
+            for r in grad_hist:
+                w.writerow({"epoch": r["epoch"], **{k: r.get(k, "") for k in layers}})
+
+        # 绝对梯度范数单独存一份：判断梯度消失要用它，不能用比值
+        abs_layers = [k[len("abs::"):] for k in grad_hist[0] if k.startswith("abs::")]
+        with (out_dir / f"gradflow_abs_{tag}.csv").open("w", newline="", encoding="utf-8-sig") as f:
+            w = csv.DictWriter(f, fieldnames=["epoch"] + abs_layers)
+            w.writeheader()
+            for r in grad_hist:
+                w.writerow({"epoch": r["epoch"],
+                            **{k: r.get(f"abs::{k}", "") for k in abs_layers}})
         try:
             import matplotlib
 

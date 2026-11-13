@@ -205,7 +205,7 @@ def main() -> int:
             axes[0].plot(xs, [r["acc"] for r in d], "o-", color=color, label=cell.upper())
             axes[1].plot(xs, [r["grad_norm"] for r in d], "o-", color=color, label=cell.upper())
 
-        axes[0].axhline(1 / N_CLASS, ls="--", color="gray", lw=1, label="随机猜")
+        axes[0].axhline(1 / N_CLASS, ls="--", color="gray", lw=1, label="chance = 1/8")
         axes[0].set_xlabel("sequence length")
         axes[0].set_ylabel("accuracy")
         axes[0].set_title("Can it remember the first token?")

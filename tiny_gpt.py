@@ -545,6 +545,8 @@ def main() -> int:
     t.add_argument("--grad-clip", type=float, default=1.0)
     t.add_argument("--eval-interval", type=int, default=250)
     t.add_argument("--eval-iters", type=int, default=20)
+    t.add_argument("--tf32", action="store_true",
+                   help="开启 TF32（fp32 矩阵乘走 Tensor Core，约快 1.4x，但数值会变）")
 
     s = sub.add_parser("sample"); common(s)
     s.add_argument("--ckpt", default="./out_gpt/best.pt")
@@ -558,6 +560,9 @@ def main() -> int:
     args = ap.parse_args()
     if getattr(args, "device", "cpu") == "cuda" and not torch.cuda.is_available():
         args.device = "cpu"
+    if getattr(args, "tf32", False):
+        torch.set_float32_matmul_precision("high")
+        print("[info] TF32 已开启（matmul precision = high）")
     return {"verify": cmd_verify, "overfit": cmd_overfit,
             "train": cmd_train, "sample": cmd_sample}[args.cmd](args)
 

@@ -114,14 +114,20 @@ def main() -> int:
     print("2. 训练速度（40 步，含前向+反向+优化器）")
     print("=" * 70)
     rows = []
-    variants = [("manual", False, False), ("sdpa", True, False)]
+    # (名字, 用不用 SDPA, 用不用 compile, 用不用 TF32)
+    variants = [
+        ("manual", False, False, False),
+        ("sdpa", True, False, False),
+        ("sdpa+tf32", True, False, True),
+    ]
     if args.compile:
-        variants.append(("sdpa+compile", True, True))
+        variants.append(("sdpa+compile", True, True, False))
 
     hdr = f"{'实现':16}{'每步 ms':>10}{'token/s':>12}{'显存 MB':>10}"
     print(hdr)
     print("-" * len(hdr))
-    for name, sdpa, use_compile in variants:
+    for name, sdpa, use_compile, use_tf32 in variants:
+        torch.set_float32_matmul_precision("high" if use_tf32 else "highest")
         m = build(device, use_sdpa=sdpa)
         if use_compile:
             m = torch.compile(m)
@@ -141,7 +147,8 @@ def main() -> int:
     print("3. 生成速度（贪心，128 token，带 KV Cache）")
     print("=" * 70)
     idx = torch.randint(0, 65, (1, 32), device=device)
-    for name, sdpa, use_compile in variants:
+    for name, sdpa, use_compile, use_tf32 in variants:
+        torch.set_float32_matmul_precision("high" if use_tf32 else "highest")
         m = build(device, use_sdpa=sdpa)
         if use_compile:
             m = torch.compile(m)

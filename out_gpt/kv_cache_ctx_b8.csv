@@ -1,0 +1,4 @@
+﻿batch,ctx,n_new,tok_s_no_cache,tok_s_cache,speedup,ms_per_token_no_cache
+8,128,32,257.8,265.0,1.028,3.88
+8,256,32,141.1,264.9,1.878,7.09
+8,512,32,45.9,152.2,3.314,21.78

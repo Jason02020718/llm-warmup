@@ -83,6 +83,7 @@ class GPTConfig:
     n_embd: int = 384
     dropout: float = 0.1
     bias: bool = True
+    use_sdpa: bool = True     # True 用 PyTorch 的 Flash Attention 实现
 
     @property
     def head_dim(self) -> int:
@@ -99,6 +100,7 @@ class CausalSelfAttention(nn.Module):
         self.cfg = cfg
         self.n_head = cfg.n_head
         self.head_dim = cfg.head_dim
+        self.use_sdpa = getattr(cfg, "use_sdpa", True)
         # 一次算出 q、k、v：比三个 Linear 快，且参数排布更紧凑
         self.c_attn = nn.Linear(cfg.n_embd, 3 * cfg.n_embd, bias=cfg.bias)
         self.c_proj = nn.Linear(cfg.n_embd, cfg.n_embd, bias=cfg.bias)
@@ -130,15 +132,30 @@ class CausalSelfAttention(nn.Module):
             v = torch.cat([past_v, v], dim=2)
         present = (k, v) if use_cache else None
 
-        att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(self.head_dim))
-        if T > 1:
-            # 需要掩码的两种情况：训练（整段），或推理时第一次喂入整段 prompt
-            Tk = k.size(2)
-            att = att.masked_fill(~self.mask[:, :, past_len:past_len + T, :Tk], float("-inf"))
-        # 推理时 q 只有 1 步、k 含全部历史，天然满足因果性，无需掩码
-        att = F.softmax(att, dim=-1)
-        att = self.attn_dropout(att)
-        y = att @ v
+        scale = 1.0 / math.sqrt(self.head_dim)
+        if self.use_sdpa:
+            # PyTorch 内置实现：会走 FlashAttention / memory-efficient 内核，
+            # 数学上和下面的手写版等价，但不需要把 (T,T) 的分数矩阵完整写回显存。
+            drop = self.attn_dropout.p if self.training else 0.0
+            if T > 1 and past_len == 0:
+                y = F.scaled_dot_product_attention(q, k, v, is_causal=True,
+                                                   dropout_p=drop, scale=scale)
+            elif T == 1:
+                y = F.scaled_dot_product_attention(q, k, v, dropout_p=drop, scale=scale)
+            else:
+                mask = self.mask[:, :, past_len:past_len + T, :k.size(2)]
+                y = F.scaled_dot_product_attention(q, k, v, attn_mask=mask,
+                                                   dropout_p=drop, scale=scale)
+        else:
+            att = (q @ k.transpose(-2, -1)) * scale
+            if T > 1:
+                # 需要掩码的两种情况：训练（整段），或推理时第一次喂入整段 prompt
+                Tk = k.size(2)
+                att = att.masked_fill(~self.mask[:, :, past_len:past_len + T, :Tk], float("-inf"))
+            # 推理时 q 只有 1 步、k 含全部历史，天然满足因果性，无需掩码
+            att = F.softmax(att, dim=-1)
+            att = self.attn_dropout(att)
+            y = att @ v
         y = y.transpose(1, 2).contiguous().view(B, T, C)
         return self.resid_dropout(self.c_proj(y)), present
 

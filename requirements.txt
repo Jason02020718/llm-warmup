@@ -1,0 +1,12 @@
+# 运行本仓库全部实验所需的依赖
+# 安装（国内建议用清华源）：
+#   python -m pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+#
+# 注意：torch 请单独按显卡安装，不要写进这条命令。
+#   python -m pip install torch torchvision --index-url https://mirrors.nju.edu.cn/pytorch/whl/cu128
+
+torch>=2.1            # 需要 F.scaled_dot_product_attention（2.0+）与 torch.compile（2.0+）
+torchvision>=0.16     # 仅第一周 MNIST 用到
+numpy>=1.24
+matplotlib>=3.7
+pyarrow>=14.0         # 读取 CIFAR-10 / wikitext 的 parquet

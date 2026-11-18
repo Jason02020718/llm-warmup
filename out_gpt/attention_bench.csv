@@ -1,0 +1,3 @@
+﻿variant,ms_per_step,k_token_per_s,peak_mem_MB,gen_tok_s
+manual,81.2,100.8,1682,353.5
+sdpa,63.8,128.4,1395,422.3

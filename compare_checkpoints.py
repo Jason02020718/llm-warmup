@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """
 compare_checkpoints.py  --  不同训练步数的模型，同一 prompt 并排对比
 
@@ -19,7 +19,7 @@ except Exception:  # noqa: BLE001
 
 import torch
 
-from tiny_gpt import GPT, GPTConfig, CharTokenizer
+from tiny_gpt import GPT, GPTConfig, tokenizer_from_state
 
 
 def main() -> int:
@@ -40,7 +40,7 @@ def main() -> int:
             continue
         ckpt = torch.load(path, map_location=args.device)
         cfg = GPTConfig(**ckpt["config"])
-        tok = CharTokenizer.from_state(ckpt["tokenizer"])
+        tok = tokenizer_from_state(ckpt["tokenizer"])
         model = GPT(cfg).to(args.device)
         model.load_state_dict(ckpt["model"])
         model.eval()

@@ -38,6 +38,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from bpe_tokenizer import BPETokenizer
+
 
 # --------------------------------------------------------------------------
 # 0. 字符级 tokenizer
@@ -59,7 +61,7 @@ class CharTokenizer:
         return "".join(self.itos[i] for i in ids)
 
     def state_dict(self) -> dict:
-        return {"chars": [self.itos[i] for i in range(self.vocab_size)]}
+        return {"type": "char", "chars": [self.itos[i] for i in range(self.vocab_size)]}
 
     @classmethod
     def from_state(cls, d: dict) -> "CharTokenizer":
@@ -69,6 +71,13 @@ class CharTokenizer:
         t.stoi = {c: i for i, c in enumerate(chars)}
         t.vocab_size = len(chars)
         return t
+
+
+def tokenizer_from_state(d: dict):
+    """checkpoint 里存的 tokenizer 可能是字符级也可能是 BPE，这里统一还原。"""
+    if d.get("type") == "bpe":
+        return BPETokenizer.from_state(d)
+    return CharTokenizer.from_state(d)
 
 
 # --------------------------------------------------------------------------
@@ -299,7 +308,22 @@ class GPT(nn.Module):
 # --------------------------------------------------------------------------
 # 5. 数据
 # --------------------------------------------------------------------------
-def load_data(path: str, block_size: int, device, val_frac: float = 0.1):
+def load_data(path: str, block_size: int, device, val_frac: float = 0.1,
+              ids_file: str | None = None, tok_json: str | None = None):
+    """两种数据来源：
+    · 给 --ids-file：读预编码好的 token id（BPE），配 --tokenizer-json 用于解码
+    · 否则：读纯文本，用字符级 tokenizer
+    """
+    if ids_file:
+        import numpy as np
+
+        ids = torch.from_numpy(np.load(ids_file).astype(np.int64))
+        tok = BPETokenizer.load(tok_json) if tok_json else None
+        n = int(len(ids) * (1 - val_frac))
+        vocab = tok.vocab_size if tok is not None else int(ids.max()) + 1
+        print(f"预编码语料 {len(ids):,} token | 词表 {vocab} | 训练 {n:,} | 验证 {len(ids)-n:,}")
+        return tok, ids[:n], ids[n:]
+
     text = Path(path).read_text(encoding="utf-8")
     tok = CharTokenizer(text)
     ids = torch.tensor(tok.encode(text), dtype=torch.long)
@@ -425,7 +449,9 @@ def cmd_overfit(args) -> int:
 
 def cmd_train(args) -> int:
     device = args.device
-    tok, train_ids, val_ids = load_data(args.data, args.block_size, device)
+    tok, train_ids, val_ids = load_data(args.data, args.block_size, device,
+                                          ids_file=args.ids_file,
+                                          tok_json=args.tokenizer_json)
     splits = {"train": train_ids, "val": val_ids}
 
     cfg = GPTConfig(vocab_size=tok.vocab_size, block_size=args.block_size,
@@ -500,7 +526,7 @@ def cmd_train(args) -> int:
 def cmd_sample(args) -> int:
     device = args.device
     ckpt = torch.load(args.ckpt, map_location=device)
-    tok = CharTokenizer.from_state(ckpt["tokenizer"])
+    tok = tokenizer_from_state(ckpt["tokenizer"])
     cfg = GPTConfig(**ckpt["config"])
     model = GPT(cfg).to(device)
     model.load_state_dict(ckpt["model"])
@@ -545,6 +571,8 @@ def main() -> int:
     t.add_argument("--grad-clip", type=float, default=1.0)
     t.add_argument("--eval-interval", type=int, default=250)
     t.add_argument("--eval-iters", type=int, default=20)
+    t.add_argument("--ids-file", default=None, help="预编码的 token id（.npy），用 BPE 时给")
+    t.add_argument("--tokenizer-json", default=None, help="BPE tokenizer 的 json 路径")
     t.add_argument("--tf32", action="store_true",
                    help="开启 TF32（fp32 矩阵乘走 Tensor Core，约快 1.4x，但数值会变）")
 
